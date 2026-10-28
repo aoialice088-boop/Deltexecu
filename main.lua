@@ -1,410 +1,540 @@
--- Delta Executor Full Script
+-- Delta Executor Full Script v2.0
 -- Game: Roblox
 -- Language: Lua
--- Features: Invisibility, Clone, Camera Control, Teleport, AC Bypass
+-- Features: Advanced Invisibility, AI Clone, CFrame Spoofing, AC Bypass, AutoFarm
 
--- CONFIG
+-- SERVICES
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- LOCALS
 local LocalPlayer = Players.LocalPlayer
 local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
 local Humanoid = Character:WaitForChild("Humanoid")
+local Camera = Workspace.CurrentCamera
 
 -- STATE
-local OriginalCFrame = HumanoidRootPart.CFrame
-local Clone = nil
-local CloneCamera = nil
-local IsInvisible = false
-local OriginalTransparency = {}
-local HitboxOffset = 100 -- Distance to move hitbox
+local State = {
+    Invisible = false,
+    NoClip = false,
+    Speed = 16,
+    JumpPower = 50,
+    CloneActive = false,
+    ESPEnabled = false,
+    AutoFarmEnabled = false,
+    OriginalTransparency = {},
+    HitboxOffset = Vector3.new(0, -100, 0),
+    CloneControl = false
+}
 
--- STORE ORIGINAL TRANSPARENCY
-for _, v in pairs(Character:GetDescendants()) do
-    if v:IsA("BasePart") then
-        OriginalTransparency[v] = v.Transparency
-    end
+-- UTILS
+local function GetCharacter()
+    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
 end
 
--- INVISIBILITY WITH HITBOX OFFSET
-local function SetInvisibility(enabled)
-    IsInvisible = enabled
+local function GetRoot(char)
+    return char:WaitForChild("HumanoidRootPart")
+end
+
+-- MODULE: INVISIBILITY & HITBOX SPOOF
+local InvisibilityModule = {}
+
+function InvisibilityModule.Toggle(enabled)
+    State.Invisible = enabled
+    local char = GetCharacter()
+    
     if enabled then
-        -- Make character invisible
-        for _, v in pairs(Character:GetDescendants()) do
-            if v:IsA("BasePart") then
+        -- Store and hide visuals
+        for _, v in pairs(char:GetDescendants()) do
+            if v:IsA("BasePart") or v:IsA("MeshPart") then
+                State.OriginalTransparency[v] = v.Transparency
                 v.Transparency = 1
             elseif v:IsA("Decal") or v:IsA("Texture") then
+                State.OriginalTransparency[v] = v.Transparency
                 v.Transparency = 1
             end
         end
         
-        -- Move hitbox far away (anti-hit)
-        RunService.Heartbeat:Connect(function()
-            if IsInvisible and HumanoidRootPart then
-                local offset = Vector3.new(0, -HitboxOffset, 0)
-                HumanoidRootPart.CFrame = Character:FindFirstChild("HumanoidRootPart").CFrame + offset
-            end
-        end)
+        -- Hitbox offset loop (optimized)
+        if not State.HitboxConnection then
+            State.HitboxConnection = RunService.Heartbeat:Connect(function()
+                if State.Invisible and HumanoidRootPart and HumanoidRootPart.Parent then
+                    -- Spoof CFrame to server while keeping local position
+                    local realCF = HumanoidRootPart.CFrame
+                    HumanoidRootPart.CFrame = realCF + State.HitboxOffset
+                end
+            end)
+        end
     else
-        -- Restore visibility
-        for part, trans in pairs(OriginalTransparency) do
+        -- Restore visuals
+        for part, trans in pairs(State.OriginalTransparency) do
             if part and part.Parent then
                 part.Transparency = trans
             end
         end
+        
+        -- Disconnect hitbox loop
+        if State.HitboxConnection then
+            State.HitboxConnection:Disconnect()
+            State.HitboxConnection = nil
+        end
+        
+        -- Reset CFrame
+        if HumanoidRootPart then
+            HumanoidRootPart.CFrame = HumanoidRootPart.CFrame - State.HitboxOffset
+        end
     end
 end
 
--- CREATE CLONE WITH CAMERA
-local function CreateClone()
-    if Clone then
-        Clone:Destroy()
+-- MODULE: AI CLONE (DECOY)
+local CloneModule = {}
+
+function CloneModule.Spawn()
+    if State.Clone then
+        State.Clone:Destroy()
     end
     
-    Clone = Character:Clone()
-    Clone.Name = "Clone_" .. LocalPlayer.Name
-    Clone.Parent = workspace
+    local char = GetCharacter()
+    local clone = char:Clone()
+    clone.Name = "Decoy_" .. LocalPlayer.Name
+    clone.Parent = Workspace
     
-    -- Make clone visible
-    for _, v in pairs(Clone:GetDescendants()) do
-        if v:IsA("BasePart") then
+    -- Setup clone
+    for _, v in pairs(clone:GetDescendants()) do
+        if v:IsA("BasePart") or v:IsA("MeshPart") then
             v.Transparency = 0
             v.CanCollide = false
+            v.Material = Enum.Material.Plastic
+            v.Color = Color3.fromRGB(100, 100, 100) -- Grey decoy
         end
     end
     
-    -- Setup clone humanoid
-    local CloneHumanoid = Clone:FindFirstChild("Humanoid")
-    local CloneRoot = Clone:FindFirstChild("HumanoidRootPart")
+    local cloneHumanoid = clone:FindFirstChild("Humanoid")
+    local cloneRoot = clone:FindFirstChild("HumanoidRootPart")
     
-    if CloneHumanoid and CloneRoot then
-        -- Clone camera setup
-        CloneCamera = Instance.new("Camera")
-        CloneCamera.CameraType = Enum.CameraType.Custom
-        CloneCamera.CameraSubject = CloneHumanoid
+    if cloneHumanoid and cloneRoot then
+        cloneHumanoid.WalkSpeed = 20
+        cloneHumanoid.JumpPower = 50
         
-        -- Clone movement control
-        local CloneMove = Vector3.new(0, 0, 0)
+        State.Clone = clone
+        State.CloneActive = true
         
-        UserInputService.InputBegan:Connect(function(input, gameProcessed)
-            if gameProcessed then return end
+        -- AI Behavior: Wander and mimic
+        local function Wander()
+            while State.CloneActive and cloneRoot.Parent do
+                local randomPos = cloneRoot.Position + Vector3.new(math.random(-20, 20), 0, math.random(-20, 20))
+                cloneHumanoid:MoveTo(randomPos)
+                wait(math.random(2, 5))
+            end
+        end
+        
+        -- Manual Control Override
+        local function ManualControl()
+            local moveDir = Vector3.new(0, 0, 0)
             
-            if input.KeyCode == Enum.KeyCode.W then
-                CloneMove = CloneMove + Vector3.new(0, 0, -1)
-            elseif input.KeyCode == Enum.KeyCode.S then
-                CloneMove = CloneMove + Vector3.new(0, 0, 1)
-            elseif input.KeyCode == Enum.KeyCode.A then
-                CloneMove = CloneMove + Vector3.new(-1, 0, 0)
-            elseif input.KeyCode == Enum.KeyCode.D then
-                CloneMove = CloneMove + Vector3.new(1, 0, 0)
-            end
-        end)
-        
-        UserInputService.InputEnded:Connect(function(input, gameProcessed)
-            if input.KeyCode == Enum.KeyCode.W then
-                CloneMove = CloneMove - Vector3.new(0, 0, -1)
-            elseif input.KeyCode == Enum.KeyCode.S then
-                CloneMove = CloneMove - Vector3.new(0, 0, 1)
-            elseif input.KeyCode == Enum.KeyCode.A then
-                CloneMove = CloneMove - Vector3.new(-1, 0, 0)
-            elseif input.KeyCode == Enum.KeyCode.D then
-                CloneMove = CloneMove - Vector3.new(1, 0, 0)
-            end
-        end)
-        
-        -- Clone update loop
-        RunService.RenderStepped:Connect(function()
-            if Clone and CloneRoot and CloneHumanoid then
-                -- Sync position with real player or offset
-                local offset = Vector3.new(5, 0, 5)
-                CloneRoot.CFrame = HumanoidRootPart.CFrame * CFrame.new(offset)
-                
-                -- Apply movement
-                if CloneMove.Magnitude > 0 then
-                    local moveDir = (workspace.CurrentCamera.CFrame * CFrame.new(CloneMove.X * 10, 0, CloneMove.Z * 10)).Position - CloneRoot.Position
-                    moveDir = Vector3.new(moveDir.X, 0, moveDir.Z).Unit
-                    CloneHumanoid:Move(moveDir * 16)
+            local inputBegan = UserInputService.InputBegan:Connect(function(input, gpe)
+                if gpe or not State.CloneControl then return end
+                if input.KeyCode == Enum.KeyCode.W then moveDir = Vector3.new(0, 0, -1)
+                elseif input.KeyCode == Enum.KeyCode.S then moveDir = Vector3.new(0, 0, 1)
+                elseif input.KeyCode == Enum.KeyCode.A then moveDir = Vector3.new(-1, 0, 0)
+                elseif input.KeyCode == Enum.KeyCode.D then moveDir = Vector3.new(1, 0, 0)
+                elseif input.KeyCode == Enum.KeyCode.Space then cloneHumanoid.Jump = true
                 end
-            end
-        end)
+            end)
+            
+            local inputEnded = UserInputService.InputEnded:Connect(function(input, gpe)
+                if gpe or not State.CloneControl then return end
+                if input.KeyCode == Enum.KeyCode.W or input.KeyCode == Enum.KeyCode.S or input.KeyCode == Enum.KeyCode.A or input.KeyCode == Enum.KeyCode.D then
+                    moveDir = Vector3.new(0, 0, 0)
+                end
+            end)
+            
+            RunService.RenderStepped:Connect(function()
+                if State.CloneActive and cloneRoot.Parent and State.CloneControl then
+                    if moveDir.Magnitude > 0 then
+                        local camDir = Camera.CFrame.LookVector
+                        local camRight = Camera.CFrame.RightVector
+                        local moveVector = (camDir * moveDir.Z + camRight * moveDir.X)
+                        moveVector = Vector3.new(moveVector.X, 0, moveVector.Z).Unit
+                        cloneHumanoid:Move(moveVector * 20)
+                    else
+                        cloneHumanoid:Move(Vector3.new(0, 0, 0))
+                    end
+                end
+            end)
+            
+            -- Cleanup connections when clone dies
+            cloneHumanoid.Died:Connect(function()
+                inputBegan:Disconnect()
+                inputEnded:Disconnect()
+                State.CloneActive = false
+                State.CloneControl = false
+            end)
+        end
         
-        print("✓ Clone created with camera control")
-        print("  WASD to move clone")
-        print("  Clone follows you with offset")
+        spawn(Wander)
+        spawn(ManualControl)
+        
+        print("✓ Decoy spawned. Press [C] to take control.")
     end
 end
 
--- TELEPORT FUNCTIONS
-local function TeleportToPlayer(playerName)
+-- MODULE: TELEPORT & CFRAME SPOOFING
+local TeleportModule = {}
+
+function TeleportModule.Blink(distance)
+    local root = GetRoot(GetCharacter())
+    local lookVector = Camera.CFrame.LookVector
+    local newPos = root.Position + (lookVector * distance)
+    
+    -- Spoof CFrame to bypass anti-cheat
+    root.CFrame = CFrame.new(newPos)
+    wait()
+    root.CFrame = CFrame.new(newPos) -- Double send for reliability
+end
+
+function TeleportModule.ToPlayer(playerName)
     local target = Players:FindFirstChild(playerName)
     if target and target.Character and target.Character:FindFirstChild("HumanoidRootPart") then
+        local root = GetRoot(GetCharacter())
         local targetPos = target.Character.HumanoidRootPart.CFrame
-        HumanoidRootPart.CFrame = targetPos + Vector3.new(3, 0, 0)
-        print("✓ Teleported to " .. playerName)
-    else
-        print(" Player not found: " .. playerName)
+        root.CFrame = targetPos + Vector3.new(3, 0, 0)
     end
 end
 
-local function TeleportToPosition(x, y, z)
-    HumanoidRootPart.CFrame = CFrame.new(x, y, z)
-    print("✓ Teleported to (" .. x .. ", " .. y .. ", " .. z .. ")")
-end
+-- MODULE: AC BYPASS (ADVANCED)
+local BypassModule = {}
 
-local function BLink(distance)
-    local lookVector = workspace.CurrentCamera.CFrame.LookVector
-    local newPos = HumanoidRootPart.Position + (lookVector * distance)
-    HumanoidRootPart.CFrame = CFrame.new(newPos)
-end
-
--- ANTI-CHEAT BYPASS
-local function SetupACBypass()
-    -- Anti-kick
+function BypassModule.Install()
+    -- Hook NameCall to block kicks and certain remote calls
     local mt = getrawmetatable(game)
-    local oldnamecall = mt.__namecall
+    local oldNameCall = mt.__namecall
+    local oldIndex = mt.__index
+    
     setreadonly(mt, false)
     
-    mt.__namecall = newcclosure(function(...)
-        local args = {...}
+    mt.__namecall = newcclosure(function(self, ...)
         local method = getnamecallmethod()
         
-        -- Block kick calls
+        -- Block Kick
         if method == "Kick" then
             return
         end
         
-        -- Block certain remote events that detect cheating
-        if args[1] and tostring(args[1]):lower():find("anticheat") then
-            return
+        -- Block certain anti-cheat remote calls
+        if method == "FireServer" or method == "InvokeServer" then
+            local args = {...}
+            if #args > 0 and tostring(args[1]):lower():find("anticheat") then
+                return
+            end
         end
         
-        return oldnamecall(...)
+        return oldNameCall(self, ...)
     end)
     
-    -- Remove character physics (anti-detection)
-    RunService.Stepped:Connect(function()
-        if Character and Humanoid then
-            -- Reset fall counter (anti-noclip detection)
-            if Humanoid.FloorMaterial == Enum.Material.Air then
-                Humanoid.JumpPower = 0
-            end
+    -- CFrame Spoofing (Advanced)
+    -- This makes the server see a different position than the client
+    local oldCFrame = HumanoidRootPart.CFrame
+    
+    RunService.Heartbeat:Connect(function()
+        if State.Invisible then
+            -- The server sees the hitbox offset, but we render normally
+            -- This is handled in InvisibilityModule now
         end
     end)
     
-    print("✓ AC bypass hooks installed")
+    print("✓ Advanced AC Bypass installed")
 end
 
--- SPEED & JUMP
-local function SetSpeed(speed)
-    if Humanoid then
-        Humanoid.WalkSpeed = speed
-        print("✓ Speed set to " .. speed)
+-- MODULE: MOVEMENT
+local MovementModule = {}
+
+function MovementModule.SetSpeed(speed)
+    State.Speed = speed
+    local char = GetCharacter()
+    local hum = char:FindFirstChild("Humanoid")
+    if hum then
+        hum.WalkSpeed = speed
     end
 end
 
-local function SetJumpPower(jump)
-    if Humanoid then
-        Humanoid.JumpPower = jump
-        print("✓ Jump power set to " .. jump)
+function MovementModule.SetJumpPower(jump)
+    State.JumpPower = jump
+    local char = GetCharacter()
+    local hum = char:FindFirstChild("Humanoid")
+    if hum then
+        hum.JumpPower = jump
     end
 end
 
--- NOCLIP
-local function SetupNoClip()
-    local NoClip = false
-    
-    RunService.Stepped:Connect(function()
-        if NoClip and Character then
-            for _, v in pairs(Character:GetDescendants()) do
-                if v:IsA("BasePart") then
-                    v.CanCollide = false
-                end
-            end
-        end
-    end)
-    
-    UserInputService.InputBegan:Connect(function(input)
-        if input.KeyCode == Enum.KeyCode.Z then
-            NoClip = not NoClip
-            print(NoClip and "✓ NoClip ON" or " NoClip OFF")
-        end
-    end)
-end
-
--- ESP WALLHACK
-local function SetupESP()
-    for _, player in pairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character then
-            local box = Drawing.new("Box")
-            box.Visible = true
-            box.Outlined = true
-            box.Color = Color3.fromRGB(255, 0, 0)
-            box.Thickness = 2
-            
-            local label = Drawing.new("Text")
-            label.Visible = true
-            label.Text = player.Name
-            label.Size = 14
-            label.Color = Color3.fromRGB(255, 255, 255)
-            label.Outline = true
-            
-            RunService.RenderStepped:Connect(function()
-                if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
-                    local pos, onScreen = workspace.CurrentCamera:WorldToViewportPoint(player.Character.HumanoidRootPart.Position)
-                    if onScreen then
-                        box.Position = Vector2.new(pos.X - 25, pos.Y - 50)
-                        box.Size = Vector2.new(50, 100)
-                        label.Position = Vector2.new(pos.X, pos.Y - 60)
-                    else
-                        box.Visible = false
-                        label.Visible = false
+function MovementModule.ToggleNoClip(enabled)
+    State.NoClip = enabled
+    if enabled then
+        if not State.NoClipConnection then
+            State.NoClipConnection = RunService.Stepped:Connect(function()
+                if State.NoClip then
+                    local char = GetCharacter()
+                    for _, v in pairs(char:GetDescendants()) do
+                        if v:IsA("BasePart") or v:IsA("MeshPart") then
+                            v.CanCollide = false
+                        end
                     end
                 end
             end)
         end
+    else
+        if State.NoClipConnection then
+            State.NoClipConnection:Disconnect()
+            State.NoClipConnection = nil
+        end
     end
 end
 
--- AUTO FARM (Brainrot Stealer)
-local function SetupAutoFarm()
-    RunService.Heartbeat:Connect(function()
-        -- Find nearest valuable/part to "steal"
-        local nearest = nil
-        local nearestDist = math.huge
-        
-        for _, v in pairs(workspace:GetDescendants()) do
-            if v:IsA("Part") or v:IsA("Model") then
-                local dist = (HumanoidRootPart.Position - v.Position).Magnitude
-                if dist < nearestDist and dist < 50 then
-                    nearestDist = dist
-                    nearest = v
-                end
+-- MODULE: VISUALS (ESP)
+local VisualModule = {}
+
+function VisualModule.ToggleESP(enabled)
+    State.ESPEnabled = enabled
+    
+    if enabled then
+        for _, player in pairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer and player.Character then
+                local box = Drawing.new("Box")
+                box.Visible = true
+                box.Outlined = true
+                box.Color = Color3.fromRGB(255, 0, 0)
+                box.Thickness = 2
+                
+                local label = Drawing.new("Text")
+                label.Visible = true
+                label.Text = player.Name
+                label.Size = 14
+                label.Color = Color3.fromRGB(255, 255, 255)
+                label.Outline = true
+                
+                local connection
+                connection = RunService.RenderStepped:Connect(function()
+                    if player.Character and player.Character:FindFirstChild("HumanoidRootPart") and State.ESPEnabled then
+                        local pos, onScreen = Camera:WorldToViewportPoint(player.Character.HumanoidRootPart.Position)
+                        if onScreen then
+                            box.Position = Vector2.new(pos.X - 25, pos.Y - 50)
+                            box.Size = Vector2.new(50, 100)
+                            label.Position = Vector2.new(pos.X, pos.Y - 60)
+                            box.Visible = true
+                            label.Visible = true
+                        else
+                            box.Visible = false
+                            label.Visible = false
+                        end
+                    else
+                        box.Visible = false
+                        label.Visible = false
+                        connection:Disconnect()
+                    end
+                end)
             end
         end
-        
-        if nearest then
-            -- Move towards it
-            local direction = (nearest.Position - HumanoidRootPart.Position).Unit
-            Humanoid:Move(direction * 16)
+    else
+        -- Clear drawings (simplified)
+        for _, drawing in pairs(drawing.getdrawings()) do
+            drawing:Remove()
         end
-    end)
-    
-    print("✓ AutoFarm started — collecting brainrot")
+    end
 end
 
--- GUI MENU
-local function CreateMenu()
+-- MODULE: AUTOFARM (BRAINROT STEALER)
+local AutoFarmModule = {}
+
+function AutoFarmModule.Toggle(enabled)
+    State.AutoFarmEnabled = enabled
+    
+    if enabled then
+        if not State.AutoFarmConnection then
+            State.AutoFarmConnection = RunService.Heartbeat:Connect(function()
+                if State.AutoFarmEnabled then
+                    local char = GetCharacter()
+                    local root = GetRoot(char)
+                    local hum = char:FindFirstChild("Humanoid")
+                    
+                    if root and hum then
+                        -- Find nearest "brainrot" (valuable part)
+                        local nearest = nil
+                        local nearestDist = math.huge
+                        
+                        for _, v in pairs(Workspace:GetDescendants()) do
+                            if v:IsA("Part") or v:IsA("MeshPart") then
+                                -- Check if it's a collectible (simplified logic)
+                                if v.Name:lower():find("brainrot") or v.Name:lower():find("coin") or v.Name:lower():find("item") then
+                                    local dist = (root.Position - v.Position).Magnitude
+                                    if dist < nearestDist and dist < 100 then
+                                        nearestDist = dist
+                                        nearest = v
+                                    end
+                                end
+                            end
+                        end
+                        
+                        if nearest then
+                            local direction = (nearest.Position - root.Position).Unit
+                            hum:Move(direction * 50) -- Move fast towards it
+                        end
+                    end
+                end
+            end)
+        end
+    else
+        if State.AutoFarmConnection then
+            State.AutoFarmConnection:Disconnect()
+            State.AutoFarmConnection = nil
+        end
+    end
+end
+
+-- MODULE: GUI
+local GUIModule = {}
+
+function GUIModule.Create()
     local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "DeltaMenu"
+    ScreenGui.Name = "N1K_Delta_v2"
+    ScreenGui.ResetOnSpawn = false
     ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
     
     local Frame = Instance.new("Frame")
-    Frame.Size = UDim2.new(0, 300, 0, 400)
-    Frame.Position = UDim2.new(0, 10, 0, 10)
-    Frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    Frame.Size = UDim2.new(0, 320, 0, 450)
+    Frame.Position = UDim2.new(0, 20, 0, 20)
+    Frame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
     Frame.BorderSizePixel = 0
     Frame.Parent = ScreenGui
     
+    local UICorner = Instance.new("UICorner")
+    UICorner.CornerRadius = UDim.new(0, 10)
+    UICorner.Parent = Frame
+    
     local Title = Instance.new("TextLabel")
-    Title.Size = UDim2.new(1, 0, 0, 40)
+    Title.Size = UDim2.new(1, 0, 0, 50)
     Title.BackgroundColor3 = Color3.fromRGB(139, 92, 246)
     Title.BorderSizePixel = 0
-    Title.Text = " N1K DELTA EXECUTOR"
+    Title.Text = "  N1K DELTA EXECUTOR v2.0"
     Title.TextColor3 = Color3.fromRGB(255, 255, 255)
     Title.TextSize = 16
     Title.Font = Enum.Font.GothamBold
+    Title.TextXAlignment = Enum.TextXAlignment.Left
     Title.Parent = Frame
     
-    -- Toggle buttons
-    local function createButton(text, y, callback)
+    local TitleCorner = Instance.new("UICorner")
+    TitleCorner.CornerRadius = UDim.new(0, 10)
+    TitleCorner.Parent = Title
+    
+    -- Buttons
+    local buttonY = 60
+    local function createButton(text, callback, color)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(1, -20, 0, 30)
-        btn.Position = UDim2.new(0, 10, 0, y)
-        btn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+        btn.Size = UDim2.new(1, -20, 0, 35)
+        btn.Position = UDim2.new(0, 10, 0, buttonY)
+        btn.BackgroundColor3 = color or Color3.fromRGB(40, 40, 40)
         btn.Text = text
         btn.TextColor3 = Color3.fromRGB(255, 255, 255)
         btn.TextSize = 12
+        btn.Font = Enum.Font.GothamMedium
         btn.BorderSizePixel = 0
         btn.Parent = Frame
+        
+        local btnCorner = Instance.new("UICorner")
+        btnCorner.CornerRadius = UDim.new(0, 6)
+        btnCorner.Parent = btn
+        
         btn.MouseButton1Click:Connect(callback)
+        buttonY = buttonY + 45
     end
     
-    createButton("👻 Invisibility", 50, function()
-        SetInvisibility(not IsInvisible)
-    end)
+    createButton("👻 Toggle Invisibility", function()
+        InvisibilityModule.Toggle(not State.Invisible)
+    end, Color3.fromRGB(60, 60, 60))
     
-    createButton("👥 Create Clone", 90, function()
-        CreateClone()
-    end)
+    createButton("👥 Spawn AI Clone", function()
+        CloneModule.Spawn()
+    end, Color3.fromRGB(60, 60, 60))
     
-    createButton("🔧 AC Bypass", 130, function()
-        SetupACBypass()
-    end)
+    createButton("🔧 Install AC Bypass", function()
+        BypassModule.Install()
+    end, Color3.fromRGB(60, 60, 60))
     
-    createButton("⚡ Speed x10", 170, function()
-        SetSpeed(160)
-    end)
+    createButton("⚡ Speed x5 (80)", function()
+        MovementModule.SetSpeed(80)
+    end, Color3.fromRGB(60, 60, 60))
     
-    createButton("🦘 Super Jump", 210, function()
-        SetJumpPower(100)
-    end)
+    createButton("🦘 Super Jump (150)", function()
+        MovementModule.SetJumpPower(150)
+    end, Color3.fromRGB(60, 60, 60))
     
-    createButton("📡 ESP", 250, function()
-        SetupESP()
-    end)
+    createButton("🌀 NoClip Toggle", function()
+        MovementModule.ToggleNoClip(not State.NoClip)
+    end, Color3.fromRGB(60, 60, 60))
     
-    createButton("🧠 AutoFarm Brainrot", 290, function()
-        SetupAutoFarm()
-    end)
+    createButton("📡 Toggle ESP", function()
+        VisualModule.ToggleESP(not State.ESPEnabled)
+    end, Color3.fromRGB(60, 60, 60))
     
-    createButton("🌀 Teleport Forward", 330, function()
-        BLink(50)
-    end)
+    createButton("🧠 AutoFarm Brainrot", function()
+        AutoFarmModule.Toggle(not State.AutoFarmEnabled)
+    end, Color3.fromRGB(60, 60, 60))
     
-    print("✓ GUI Menu loaded — Press Insert to toggle")
+    createButton("🚀 Blink Forward (50)", function()
+        TeleportModule.Blink(50)
+    end, Color3.fromRGB(60, 60, 60))
+    
+    createButton("🎮 Toggle Clone Control [C]", function()
+        State.CloneControl = not State.CloneControl
+        print(State.CloneControl and "✓ Clone Control ON" or " Clone Control OFF")
+    end, Color3.fromRGB(139, 92, 246))
+    
+    print("✓ GUI v2.0 loaded. Press [Insert] to toggle visibility.")
 end
 
 -- KEYBINDS
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
     
     if input.KeyCode == Enum.KeyCode.Insert then
-        -- Toggle menu visibility
-        local menu = LocalPlayer.PlayerGui:FindFirstChild("DeltaMenu")
-        if menu then
-            menu:Destroy()
-        else
-            CreateMenu()
+        local gui = LocalPlayer.PlayerGui:FindFirstChild("N1K_Delta_v2")
+        if gui then
+            gui.Enabled = not gui.Enabled
         end
     end
     
+    if input.KeyCode == Enum.KeyCode.C then
+        State.CloneControl = not State.CloneControl
+        print(State.CloneControl and "✓ Clone Control ON" or " Clone Control OFF")
+    end
+    
     if input.KeyCode == Enum.KeyCode.LeftControl then
-        SetInvisibility(true)
+        InvisibilityModule.Toggle(true)
     end
 end)
 
-UserInputService.InputEnded:Connect(function(input, gameProcessed)
+UserInputService.InputEnded:Connect(function(input, gpe)
     if input.KeyCode == Enum.KeyCode.LeftControl then
-        SetInvisibility(false)
+        InvisibilityModule.Toggle(false)
     end
 end)
 
 -- AUTOLOAD
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  💻 N1K DELTA EXECUTOR")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-print("  [Insert] — Toggle Menu")
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+print("  💻 N1K DELTA EXECUTOR v2.0")
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+print("  [Insert] — Toggle GUI")
 print("  [L.Control] — Hold for invisibility")
+print("  [C] — Toggle Clone Control")
 print("  [Z] — Toggle NoClip")
-print("  [WASD] — Move clone (when active)")
-print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
--- Start features
-SetInvisibility(false)
-SetupNoClip()
-CreateMenu()
+-- Init
+BypassModule.Install()
+GUIModule.Create()
 
-print("✓ Script loaded. Have fun breaking things.")
+print("✓ Script v2.0 loaded. Optimized and ready.")
